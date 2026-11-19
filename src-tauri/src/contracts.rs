@@ -180,6 +180,50 @@ pub struct ApplyReport {
     pub snapshot: ProxySnapshot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/generated/")]
+pub enum GitProxyMode {
+    Custom,
+    Inherit,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/generated/")]
+pub struct GitProxySnapshot {
+    pub available: bool,
+    /// 多来源、include 或重复 http.proxy 时只读，避免覆盖不明确的配置。
+    pub writable: bool,
+    pub mode: GitProxyMode,
+    /// 仅供显示的脱敏值，不可用它恢复认证信息。
+    pub proxy: Option<String>,
+    /// 当前进程内的快照身份；原始值只保留在 Rust 内存中。
+    pub revision: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/generated/")]
+pub struct GitProxyInput {
+    pub mode: GitProxyMode,
+    /// custom 下 None 保留快照中的原始值；其他模式忽略该字段。
+    pub proxy: Option<String>,
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/generated/")]
+pub struct GitApplyReport {
+    pub status: ApplyStatus,
+    pub message: String,
+    /// 写入后回读失败时为空，不能将上次快照视为保存成功。
+    pub snapshot: Option<GitProxySnapshot>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyError {

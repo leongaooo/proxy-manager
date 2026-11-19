@@ -3,14 +3,23 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApplyReport, ProxySnapshot, SectionResult } from "../generated/bindings";
 
-const { getProxySnapshotMock, applyProxySettingsMock } = vi.hoisted(() => ({
+const {
+  getProxySnapshotMock,
+  applyProxySettingsMock,
+  getGitProxySnapshotMock,
+  applyGitProxySettingsMock,
+} = vi.hoisted(() => ({
   getProxySnapshotMock: vi.fn(),
   applyProxySettingsMock: vi.fn(),
+  getGitProxySnapshotMock: vi.fn(),
+  applyGitProxySettingsMock: vi.fn(),
 }));
 
 vi.mock("../api/proxy", () => ({
   getProxySnapshot: getProxySnapshotMock,
   applyProxySettings: applyProxySettingsMock,
+  getGitProxySnapshot: getGitProxySnapshotMock,
+  applyGitProxySettings: applyGitProxySettingsMock,
 }));
 
 import App from "../App.vue";
@@ -70,189 +79,264 @@ function section(status: SectionResult["status"], message: string): SectionResul
 function makeReport(
   snapshot: ProxySnapshot,
   status: ApplyReport["status"] = "applied",
-  terminal = section("applied", "终端代理已保存"),
-  system = section("applied", "系统代理已保存"),
+  terminal: SectionResult | null = section("applied", "终端代理已保存"),
+  system: SectionResult | null = section("applied", "系统代理已保存"),
 ): ApplyReport {
   return { status, terminal, system, snapshot };
 }
 
-describe("代理设置首屏", () => {
-  beforeEach(() => {
-    getProxySnapshotMock.mockReset();
-    applyProxySettingsMock.mockReset();
-  });
+const gitSnapshot = {
+  available: true,
+  writable: true,
+  mode: "custom" as const,
+  proxy: "http://***:***@proxy.example:8080",
+  revision: "v1",
+  warnings: [],
+};
 
-  it("App_should区分持久进程与launchd值并脱敏_when读取成功", async () => {
-    getProxySnapshotMock.mockResolvedValue(makeSnapshot());
+beforeEach(() => {
+  vi.restoreAllMocks();
+  getProxySnapshotMock.mockReset().mockResolvedValue(makeSnapshot());
+  applyProxySettingsMock.mockReset().mockResolvedValue(makeReport(makeSnapshot()));
+  getGitProxySnapshotMock.mockReset().mockResolvedValue(gitSnapshot);
+  applyGitProxySettingsMock
+    .mockReset()
+    .mockResolvedValue({ status: "applied", message: "已保存并回读", snapshot: gitSnapshot });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+});
 
+describe("三页签界面", () => {
+  it("读取持久值并脱敏，默认折叠进程和来源", async () => {
     const wrapper = mount(App);
     await flushPromises();
-
     expect(getProxySnapshotMock).toHaveBeenCalledTimes(1);
-    expect(wrapper.text()).toContain("应用进程值");
-    expect(wrapper.text()).toContain("macOS launchd 用户会话值");
-    expect(wrapper.text()).toContain("测试 Shell 配置区块");
-    expect(wrapper.text()).toContain("检测到自动代理配置");
-    expect(wrapper.text()).not.toContain("alice:secret");
-    expect(wrapper.text()).not.toContain("process:secret");
-    expect(wrapper.text()).not.toContain("launchd:secret");
-    expect(wrapper.text()).not.toContain("pac:secret");
+    expect(wrapper.find("details").attributes("open")).toBeUndefined();
     expect((wrapper.find("#terminal-httpProxy").element as HTMLInputElement).value).toBe(
       "http://***:***@127.0.0.1:8080",
     );
+    expect(wrapper.html()).not.toContain("alice:secret");
+    expect(wrapper.html()).not.toContain("pac:secret");
   });
 
-  it("App_should展示一次可行动错误并允许重试_when首屏读取失败", async () => {
-    getProxySnapshotMock
-      .mockRejectedValueOnce({
-        message: "无法读取 http://alice:secret@127.0.0.1:8080",
-      })
-      .mockResolvedValueOnce(makeSnapshot());
-
-    const wrapper = mount(App);
+  it("切换不保存不丢草稿，箭头和Home/End更新选中及焦点", async () => {
+    const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
-
-    const alerts = wrapper.findAll('[role="alert"]');
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0].text()).toContain("重新读取");
-    expect(alerts[0].text()).toContain("http://***:***@127.0.0.1:8080");
-    expect(alerts[0].text()).not.toContain("alice:secret");
-    expect(wrapper.find("form").exists()).toBe(false);
-
-    await wrapper.find("button").trigger("click");
+    await wrapper.find("#terminal-httpProxy").setValue("http://draft.example:9000");
+    await wrapper.find("#tab-terminal").trigger("keydown", { key: "End" });
     await flushPromises();
-    expect(wrapper.find("form").exists()).toBe(true);
+    expect(wrapper.find("#tab-git").attributes("aria-selected")).toBe("true");
+    expect(document.activeElement?.id).toBe("tab-git");
+    await wrapper.find("#tab-git").trigger("keydown", { key: "Home" });
+    expect((wrapper.find("#terminal-httpProxy").element as HTMLInputElement).value).toBe(
+      "http://draft.example:9000",
+    );
+    expect(applyProxySettingsMock).not.toHaveBeenCalled();
+    wrapper.unmount();
   });
 
-  it("App_should在交互后同步视觉与aria验证_when端口非法", async () => {
-    getProxySnapshotMock.mockResolvedValue(makeSnapshot());
+  it("系统端口失焦后展示验证，非法系统草稿不阻挡终端页保存", async () => {
     const wrapper = mount(App);
     await flushPromises();
+    await wrapper.find("#tab-system").trigger("click");
     const port = wrapper.find("#system-http-port");
-
-    expect(port.attributes("aria-invalid")).toBe("false");
-    expect(wrapper.find("#system-http-port-error").exists()).toBe(false);
-
     await port.setValue("70000");
     expect(wrapper.find("#system-http-port-error").exists()).toBe(false);
     await port.trigger("blur");
-
     expect(port.attributes("aria-invalid")).toBe("true");
-    expect(wrapper.find("#system-http-port-error").text()).toContain("1 到 65535");
+    await wrapper.find("#tab-terminal").trigger("click");
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+    expect(applyProxySettingsMock).toHaveBeenCalledWith({
+      terminal: { httpProxy: null, httpsProxy: null, allProxy: null, noProxy: null },
+      system: null,
+    });
+    expect((port.element as HTMLInputElement).value).toBe("70000");
+  });
+
+  it("首屏读取失败可重试且错误脱敏", async () => {
+    getProxySnapshotMock.mockRejectedValueOnce("读取 http://alice:secret@proxy.example 失败");
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.find('[role="alert"]').text()).not.toContain("alice:secret");
+    await wrapper.find(".secondary-button").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("#terminal-httpProxy").exists()).toBe(true);
+  });
+
+  it("Git页独立地址与保存边界", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.find("#terminal-noProxy").setValue("draft-only");
+    await wrapper.find("#tab-git").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("#git-proxy").attributes("type")).toBe("password");
+    await wrapper.find("#git-proxy").setValue("http://new:credential@proxy.example:9000");
+    await wrapper.find("form").trigger("submit");
+    await flushPromises();
+    expect(applyGitProxySettingsMock).toHaveBeenCalledWith({
+      mode: "custom",
+      proxy: "http://new:credential@proxy.example:9000",
+      expectedRevision: "v1",
+    });
+    expect(applyProxySettingsMock).not.toHaveBeenCalled();
+    expect((wrapper.find("#terminal-noProxy").element as HTMLInputElement).value).toBe(
+      "draft-only",
+    );
   });
 });
 
-describe("useProxySettings", () => {
-  beforeEach(() => {
-    getProxySnapshotMock.mockReset();
-    applyProxySettingsMock.mockReset();
-  });
+it("保存中按钮禁用，切页后保留各页操作状态", async () => {
+  let resolveSave!: (report: ApplyReport) => void;
+  applyProxySettingsMock.mockImplementationOnce(
+    () =>
+      new Promise<ApplyReport>((resolve) => {
+        resolveSave = resolve;
+      }),
+  );
+  const wrapper = mount(App);
+  await flushPromises();
+  await wrapper.find("form").trigger("submit");
+  expect(wrapper.find(".primary-button").attributes("disabled")).toBeDefined();
+  expect(wrapper.find(".primary-button").text()).toContain("正在保存");
+  await wrapper.find("#tab-system").trigger("click");
+  expect(wrapper.find(".primary-button").attributes("disabled")).toBeUndefined();
+  await wrapper.find("#tab-terminal").trigger("click");
+  expect(wrapper.find(".primary-button").attributes("disabled")).toBeDefined();
+  resolveSave(makeReport(makeSnapshot(), "applied", section("applied", "ok"), null));
+  await flushPromises();
+  expect(wrapper.find(".primary-button").attributes("disabled")).toBeUndefined();
+});
 
-  it("草稿修改_should不反写权威快照", async () => {
-    const initial = makeSnapshot();
-    getProxySnapshotMock.mockResolvedValue(initial);
+it("macOS取消切换服务时，选择框和草稿均停留原服务", async () => {
+  const wrapper = mount(App);
+  await flushPromises();
+  await wrapper.find("#tab-system").trigger("click");
+  await wrapper.find("#system-http-host").setValue("draft.example");
+  vi.mocked(window.confirm).mockReturnValue(false);
+  await wrapper.find("#system-target").setValue("Ethernet");
+  await flushPromises();
+  expect((wrapper.find("#system-target").element as HTMLSelectElement).value).toBe("Wi-Fi");
+  expect(getProxySnapshotMock).toHaveBeenCalledTimes(1);
+});
+
+describe("独立保存与回读", () => {
+  it("终端保存只写终端，回读不覆盖系统权威快照和草稿", async () => {
     const state = useProxySettings();
     await state.reload();
+    state.terminalDraft.httpProxy = "http://terminal.example:9000";
+    state.markTerminalDirty("httpProxy");
+    state.systemDraft.http.port = "70000";
+    state.markSystemDirty();
+    const next = makeSnapshot();
+    next.system.http = { host: "unrelated.example", port: 1234 };
+    applyProxySettingsMock.mockResolvedValue(
+      makeReport(next, "applied", section("applied", "ok"), null),
+    );
+    await state.save("terminal");
+    expect(applyProxySettingsMock.mock.calls[0][0].system).toBeNull();
+    expect(state.systemDraft.http.port).toBe("70000");
+    expect(state.systemDirty.value).toBe(true);
+    expect(state.snapshot.value?.system.http?.host).toBe("127.0.0.1");
+  });
 
+  it("系统保存只带系统且不清除缺席终端草稿", async () => {
+    const state = useProxySettings();
+    await state.reload();
+    state.terminalDraft.httpProxy = "draft";
+    state.markTerminalDirty("httpProxy");
+    state.systemDraft.http.host = "new.example";
+    state.markSystemDirty();
+    applyProxySettingsMock.mockResolvedValue(
+      makeReport(makeSnapshot(), "applied", null, section("applied", "ok")),
+    );
+    await state.save("system");
+    expect(applyProxySettingsMock.mock.calls[0][0].terminal).toBeNull();
+    expect(state.terminalDraft.httpProxy).toBe("draft");
+    expect(state.terminalDirty.httpProxy).toBe(true);
+    expect(state.systemDirty.value).toBe(false);
+  });
+
+  it.each(["failed", "missing"])("%s结果保留当前草稿", async (result) => {
+    const state = useProxySettings();
+    await state.reload();
     state.terminalDraft.httpProxy = "http://draft.example:9000";
     state.markTerminalDirty("httpProxy");
-
-    expect(state.snapshot.value?.terminal.persisted.httpProxy).toBe(
-      "http://alice:secret@127.0.0.1:8080",
-    );
-    expect(state.terminalDraft.httpProxy).toBe("http://draft.example:9000");
-  });
-
-  it("saveAll_should拒绝重复提交_when上一次保存尚未完成", async () => {
-    const initial = makeSnapshot();
-    getProxySnapshotMock.mockResolvedValue(initial);
-    let resolveApply: (report: ApplyReport) => void = () => undefined;
-    applyProxySettingsMock.mockImplementation(
-      () =>
-        new Promise<ApplyReport>((resolve) => {
-          resolveApply = resolve;
-        }),
-    );
-    const state = useProxySettings();
-    await state.reload();
-
-    const first = state.saveAll();
-    const second = state.saveAll();
-    expect(applyProxySettingsMock).toHaveBeenCalledTimes(1);
-    await expect(second).resolves.toBeNull();
-
-    resolveApply(makeReport(initial));
-    await expect(first).resolves.toMatchObject({ status: "applied" });
-    expect(state.saving.value).toBe(false);
-  });
-
-  it("selectTarget_should传递macOS服务并用于后续保存", async () => {
-    const wifi = makeSnapshot();
-    const ethernet = makeSnapshot();
-    ethernet.system.selectedTarget = "Ethernet";
-    ethernet.system.http = { host: "10.0.0.2", port: 8080 };
-    getProxySnapshotMock.mockResolvedValueOnce(wifi).mockResolvedValueOnce(ethernet);
-    applyProxySettingsMock.mockResolvedValue(makeReport(ethernet));
-    const state = useProxySettings();
-    await state.reload();
-
-    await state.selectTarget("Ethernet");
-    expect(getProxySnapshotMock).toHaveBeenNthCalledWith(2, "Ethernet");
-    expect(state.systemDraft.http.host).toBe("10.0.0.2");
-
-    await state.saveAll();
-    expect(applyProxySettingsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        system: expect.objectContaining({ target: "Ethernet" }),
-      }),
-    );
-  });
-
-  it("saveAll_should保留失败区块草稿并更新成功区块_when部分成功", async () => {
-    const initial = makeSnapshot();
-    const nextSnapshot = makeSnapshot();
-    nextSnapshot.terminal.persisted.httpProxy = "http://saved:secret@proxy.example:8080";
-    nextSnapshot.system.http = { host: "192.0.2.10", port: 8080 };
-    getProxySnapshotMock.mockResolvedValue(initial);
     applyProxySettingsMock.mockResolvedValue(
       makeReport(
-        nextSnapshot,
-        "partial",
-        section("applied", "终端代理已保存"),
-        section("failed", "系统代理权限不足，请授权后重试"),
+        makeSnapshot(),
+        "failed",
+        result === "missing" ? null : section("failed", "锁占用"),
+        null,
       ),
     );
-    const state = useProxySettings();
-    await state.reload();
-    state.terminalDraft.httpProxy = "http://terminal-draft.example:8080";
-    state.markTerminalDirty("httpProxy");
-    state.systemDraft.http.host = "system-draft.example";
-    state.markSystemDirty();
-
-    await state.saveAll();
-
-    expect(state.terminalDraft.httpProxy).toBe("http://***:***@proxy.example:8080");
-    expect(state.systemDraft.http.host).toBe("system-draft.example");
-    expect(state.systemDirty.value).toBe(true);
-    expect(state.snapshot.value?.system.http?.host).toBe("192.0.2.10");
+    await state.save("terminal");
+    expect(state.terminalDraft.httpProxy).toBe("http://draft.example:9000");
+    expect(state.dirty.value.terminal).toBe(true);
   });
 
-  it("saveAll_should脱敏全局错误并保留草稿_when命令失败", async () => {
-    const initial = makeSnapshot();
-    getProxySnapshotMock.mockResolvedValue(initial);
-    applyProxySettingsMock.mockRejectedValue({
-      message: "写入 http://alice:secret@127.0.0.1:8080 失败",
-    });
+  it("重新读取取消不调用命令、不丢草稿", async () => {
     const state = useProxySettings();
     await state.reload();
-    state.systemDraft.http.host = "draft.example";
+    state.terminalDraft.httpProxy = "draft";
+    state.markTerminalDirty("httpProxy");
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await state.reload("terminal");
+    expect(getProxySnapshotMock).toHaveBeenCalledTimes(1);
+    expect(applyProxySettingsMock).not.toHaveBeenCalled();
+    expect(state.terminalDraft.httpProxy).toBe("draft");
+  });
+
+  it("重读当前页不覆盖其他页，重读失败保留当前草稿", async () => {
+    const state = useProxySettings();
+    await state.reload();
+    state.systemDraft.http.host = "system-draft";
     state.markSystemDirty();
+    await state.reload("terminal");
+    expect(state.systemDraft.http.host).toBe("system-draft");
+    state.terminalDraft.httpProxy = "terminal-draft";
+    state.markTerminalDirty("httpProxy");
+    getProxySnapshotMock.mockRejectedValueOnce("权限不足");
+    await state.reload("terminal");
+    expect(state.terminalDraft.httpProxy).toBe("terminal-draft");
+    expect(state.dirty.value.terminal).toBe(true);
+  });
 
-    await state.saveAll();
+  it("保存中拒绝重复提交且失败可以恢复", async () => {
+    const state = useProxySettings();
+    await state.reload();
+    let rejectSave!: (error: unknown) => void;
+    applyProxySettingsMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    const first = state.save("terminal");
+    await state.save("terminal");
+    expect(applyProxySettingsMock).toHaveBeenCalledTimes(1);
+    expect(state.pages.terminal.saving).toBe(true);
+    rejectSave("http://user:secret@proxy.example 失败");
+    await first;
+    expect(state.pages.terminal.saveError).not.toContain("user:secret");
+    expect(state.pages.terminal.saving).toBe(false);
+    await state.save("terminal");
+    expect(applyProxySettingsMock).toHaveBeenCalledTimes(2);
+  });
 
-    expect(state.saveError.value).toContain("http://***:***@127.0.0.1:8080");
-    expect(state.saveError.value).not.toContain("alice:secret");
-    expect(state.saveError.value).toContain("重新读取核对");
-    expect(state.systemDraft.http.host).toBe("draft.example");
+  it("macOS服务切换取消保留草稿，确认后只更新系统", async () => {
+    const state = useProxySettings();
+    await state.reload();
+    state.systemDraft.http.host = "draft";
+    state.markSystemDirty();
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await state.selectTarget("Ethernet");
+    expect(getProxySnapshotMock).toHaveBeenCalledTimes(1);
+    expect(state.systemDraft.target).toBe("Wi-Fi");
+    vi.mocked(window.confirm).mockReturnValue(true);
+    const next = makeSnapshot();
+    next.system.selectedTarget = "Ethernet";
+    getProxySnapshotMock.mockResolvedValueOnce(next);
+    await state.selectTarget("Ethernet");
+    expect(state.systemDraft.target).toBe("Ethernet");
   });
 });

@@ -30,13 +30,17 @@ function visibleError(field: SystemField): string {
 }
 
 function selectTarget(event: Event) {
-  emit("selectTarget", (event.target as HTMLSelectElement).value);
+  const select = event.target as HTMLSelectElement;
+  const requestedTarget = select.value;
+  // 读取成功后才切换权威服务；确认取消或读取失败时保留原选项。
+  select.value = props.draft.target;
+  emit("selectTarget", requestedTarget);
 }
 </script>
 
 <template>
   <fieldset class="proxy-section" :disabled="disabled">
-    <legend>手动系统代理</legend>
+    <legend>系统代理</legend>
     <p class="section-intro">
       配置操作系统的手动代理。保存不会擅自清除 PAC
       等自动配置；存在冲突时请按警告到系统网络设置中处理。
@@ -75,7 +79,7 @@ function selectTarget(event: Event) {
         type="checkbox"
         @change="emit('change')"
       />
-      启用手动系统代理（关闭时保留服务器与绕过配置）
+      启用手动代理
     </label>
 
     <div class="protocol-grid">
@@ -137,19 +141,17 @@ function selectTarget(event: Event) {
     </div>
 
     <div class="field">
-      <label for="system-bypass">绕过代理（bypass）</label>
+      <label for="system-bypass">绕过代理</label>
       <textarea
         id="system-bypass"
         v-model="draft.bypassText"
         name="system-bypass"
         autocomplete="off"
-        rows="4"
+        rows="2"
         aria-describedby="system-bypass-hint"
         @input="emit('change')"
       />
-      <p id="system-bypass-hint" class="hint">
-        每行或用逗号分隔一个主机、域名或网段；保存时会去除空项并归一为数组。
-      </p>
+      <p id="system-bypass-hint" class="hint">主机、域名或网段，以逗号或换行分隔。</p>
     </div>
 
     <div v-if="snapshot.autoConfig" class="notice warning-notice">

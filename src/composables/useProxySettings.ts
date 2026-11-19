@@ -5,28 +5,27 @@ import type {
   ApplyRequest,
   ProxyEndpoint,
   ProxySnapshot,
+  SystemSnapshot,
   SystemProxyInput,
   TerminalProxyInput,
   TerminalValues,
 } from "../generated/bindings";
 import { maskSensitiveText, readableError } from "../utils/sensitive";
 
+export type ProxyPage = "terminal" | "system";
 export type TerminalField = keyof TerminalValues;
 export type SystemProtocol = "http" | "https" | "socks";
 export type SystemField = `${SystemProtocol}.host` | `${SystemProtocol}.port` | "target";
-
 export interface EndpointDraft {
   host: string;
   port: string;
 }
-
 export interface TerminalDraft {
   httpProxy: string;
   httpsProxy: string;
   allProxy: string;
   noProxy: string;
 }
-
 export interface SystemDraft {
   enabled: boolean;
   http: EndpointDraft;
@@ -35,78 +34,70 @@ export interface SystemDraft {
   bypassText: string;
   target: string;
 }
-
+export interface PageState {
+  loading: boolean;
+  saving: boolean;
+  loadError: string;
+  saveError: string;
+  submitCount: number;
+  lastReadAt: string;
+  report: ApplyReport | null;
+}
+export function createPageState(): PageState {
+  return {
+    loading: false,
+    saving: false,
+    loadError: "",
+    saveError: "",
+    submitCount: 0,
+    lastReadAt: "",
+    report: null,
+  };
+}
 const terminalFields: TerminalField[] = ["httpProxy", "httpsProxy", "allProxy", "noProxy"];
-
-function createTerminalDraft(): TerminalDraft {
-  return {
-    httpProxy: "",
-    httpsProxy: "",
-    allProxy: "",
-    noProxy: "",
-  };
-}
-
-function createEndpointDraft(): EndpointDraft {
-  return { host: "", port: "" };
-}
-
-function createSystemDraft(): SystemDraft {
-  return {
-    enabled: false,
-    http: createEndpointDraft(),
-    https: createEndpointDraft(),
-    socks: createEndpointDraft(),
-    bypassText: "",
-    target: "",
-  };
-}
-
 function endpointDraft(endpoint: ProxyEndpoint | null): EndpointDraft {
-  return {
-    host: endpoint?.host ?? "",
-    port: endpoint === null ? "" : String(endpoint.port),
-  };
+  return { host: endpoint?.host ?? "", port: endpoint === null ? "" : String(endpoint.port) };
 }
-
 export function normalizeBypass(value: string): string[] {
   return value
     .split(/[\n,，]/)
     .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+    .filter(Boolean);
 }
-
 function toEndpointInput(draft: EndpointDraft): ProxyEndpoint | null {
   const host = draft.host.trim();
-  if (!host && !draft.port.trim()) {
-    return null;
-  }
-  return { host, port: Number(draft.port) };
+  return !host && !draft.port.trim() ? null : { host, port: Number(draft.port) };
 }
 
-/**
- * 权威快照只来自后端读取或保存回读；表单草稿始终单独保存。
- * 脱敏的终端字段只有在用户实际编辑后才会进入请求，其他字段以 null 表示保持原值。
- */
+/** 每页拥有独立读写状态和草稿；完整后端快照仅合并本次操作的区块，避免跨页覆盖。 */
 export function useProxySettings() {
   const snapshot = ref<ProxySnapshot | null>(null);
-  const report = ref<ApplyReport | null>(null);
-  const loading = ref(false);
-  const saving = ref(false);
-  const loadError = ref("");
-  const saveError = ref("");
-  const submitCount = ref(0);
-  const lastReadAt = ref("");
-  const systemDirty = ref(false);
-
-  const terminalDraft = reactive<TerminalDraft>(createTerminalDraft());
-  const systemDraft = reactive<SystemDraft>(createSystemDraft());
+  const pages = reactive({ terminal: createPageState(), system: createPageState() });
+  const terminalDraft = reactive<TerminalDraft>({
+    httpProxy: "",
+    httpsProxy: "",
+    allProxy: "",
+    noProxy: "",
+  });
+  const systemDraft = reactive<SystemDraft>({
+    enabled: false,
+    http: endpointDraft(null),
+    https: endpointDraft(null),
+    socks: endpointDraft(null),
+    bypassText: "",
+    target: "",
+  });
   const terminalDirty = reactive<Record<TerminalField, boolean>>({
     httpProxy: false,
     httpsProxy: false,
     allProxy: false,
     noProxy: false,
   });
+  const systemDirty = ref(false);
+  const dirty = computed(() => ({
+    terminal: terminalFields.some((field) => terminalDirty[field]),
+    system: systemDirty.value,
+  }));
 
   function syncTerminalDraft(values: TerminalValues) {
     for (const field of terminalFields) {
@@ -114,9 +105,7 @@ export function useProxySettings() {
       terminalDirty[field] = false;
     }
   }
-
-  function syncSystemDraft(nextSnapshot: ProxySnapshot) {
-    const system = nextSnapshot.system;
+  function syncSystemDraft(system: SystemSnapshot) {
     systemDraft.enabled = system.enabled;
     Object.assign(systemDraft.http, endpointDraft(system.http));
     Object.assign(systemDraft.https, endpointDraft(system.https));
@@ -125,11 +114,14 @@ export function useProxySettings() {
     systemDraft.target = system.selectedTarget ?? system.availableTargets[0] ?? "";
     systemDirty.value = false;
   }
-
+  function mergeSnapshot(next: ProxySnapshot, scope: ProxyPage) {
+    snapshot.value = snapshot.value
+      ? { ...snapshot.value, platform: next.platform, [scope]: next[scope] }
+      : next;
+  }
   function markTerminalDirty(field: TerminalField) {
     terminalDirty[field] = true;
   }
-
   function markSystemDirty() {
     systemDirty.value = true;
   }
@@ -138,73 +130,80 @@ export function useProxySettings() {
     const errors: Partial<Record<SystemField, string>> = {};
     const protocols: SystemProtocol[] = ["http", "https", "socks"];
     for (const protocol of systemDraft.enabled ? protocols : []) {
-      const endpoint = systemDraft[protocol];
-      const host = endpoint.host.trim();
-      const port = endpoint.port.trim();
+      const { host: rawHost, port: rawPort } = systemDraft[protocol];
+      const host = rawHost.trim();
+      const port = rawPort.trim();
       if (!host && port) {
-        errors[`${protocol}.host`] = "已填写端口，请同时填写对应主机。";
+        errors[`${protocol}.host`] = "请填写主机。";
       }
       if (host && !port) {
-        errors[`${protocol}.port`] = "已填写主机，请同时填写对应端口。";
+        errors[`${protocol}.port`] = "请填写端口。";
       } else if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) {
-        errors[`${protocol}.port`] = "端口必须是 1 到 65535 之间的整数。";
+        errors[`${protocol}.port`] = "端口须为 1 到 65535 的整数。";
       }
     }
-    if (
-      snapshot.value?.platform === "macos" &&
-      snapshot.value.system.availableTargets.length > 0 &&
-      !systemDraft.target.trim()
-    ) {
-      errors.target = "请选择要读取和保存的 macOS 网络服务。";
+    if (snapshot.value?.platform === "macos" && !systemDraft.target.trim()) {
+      errors.target = "请选择网络服务。";
     }
     return errors;
   });
 
-  const hasSystemErrors = computed(() => Object.keys(systemErrors.value).length > 0);
-
-  async function readSnapshot(target?: string, scope: "all" | "system" = "all") {
-    if (loading.value || saving.value) {
+  async function readPage(scope: ProxyPage, target?: string) {
+    const state = pages[scope];
+    if (state.loading || state.saving) {
       return;
     }
-    loading.value = true;
-    loadError.value = "";
-    saveError.value = "";
+    state.loading = true;
+    state.loadError = "";
     try {
-      const nextSnapshot = await getProxySnapshot(target);
-      snapshot.value = nextSnapshot;
-      lastReadAt.value = new Date().toLocaleString("zh-CN", { hour12: false });
-      if (scope === "all") {
-        syncTerminalDraft(nextSnapshot.terminal.persisted);
+      const next = await getProxySnapshot(target);
+      // 首次读取建立两页基线；之后仅允许当前操作替换自己的草稿。
+      const initial = snapshot.value === null;
+      mergeSnapshot(next, scope);
+      if (scope === "terminal" || initial) {
+        syncTerminalDraft(next.terminal.persisted);
       }
-      syncSystemDraft(nextSnapshot);
-      report.value = null;
-      submitCount.value = 0;
+      if (scope === "system" || initial) {
+        syncSystemDraft(next.system);
+      }
+      state.lastReadAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      state.report = null;
+      state.saveError = "";
+      state.submitCount = 0;
     } catch (error) {
-      loadError.value = `读取代理设置失败：${readableError(error)}。请检查系统权限或网络服务选择后重试。`;
+      state.loadError = `读取失败：${readableError(error)}。请检查权限后重新读取；草稿已保留。`;
     } finally {
-      loading.value = false;
+      state.loading = false;
     }
   }
-
-  async function reload() {
-    const target = snapshot.value?.system.selectedTarget ?? undefined;
-    await readSnapshot(target);
-  }
-
-  async function selectTarget(target: string) {
-    if (!target || target === systemDraft.target) {
+  async function reload(scope: ProxyPage = "terminal") {
+    if (pages[scope].loading || pages[scope].saving) {
       return;
     }
-    await readSnapshot(target, "system");
+    if (dirty.value[scope] && !window.confirm("重新读取将丢弃当前页未保存的修改，是否继续？")) {
+      return;
+    }
+    await readPage(scope, snapshot.value?.system.selectedTarget ?? undefined);
   }
-
-  function createRequest(): ApplyRequest {
-    const terminal: TerminalProxyInput = {
-      httpProxy: terminalDirty.httpProxy ? terminalDraft.httpProxy : null,
-      httpsProxy: terminalDirty.httpsProxy ? terminalDraft.httpsProxy : null,
-      allProxy: terminalDirty.allProxy ? terminalDraft.allProxy : null,
-      noProxy: terminalDirty.noProxy ? terminalDraft.noProxy : null,
-    };
+  async function selectTarget(target: string) {
+    if (!target || target === systemDraft.target || pages.system.loading || pages.system.saving) {
+      return;
+    }
+    if (dirty.value.system && !window.confirm("切换网络服务将丢弃系统页未保存的修改，是否继续？")) {
+      return;
+    }
+    await readPage("system", target);
+  }
+  function createRequest(scope: ProxyPage): ApplyRequest {
+    if (scope === "terminal") {
+      const terminal: TerminalProxyInput = {
+        httpProxy: terminalDirty.httpProxy ? terminalDraft.httpProxy : null,
+        httpsProxy: terminalDirty.httpsProxy ? terminalDraft.httpsProxy : null,
+        allProxy: terminalDirty.allProxy ? terminalDraft.allProxy : null,
+        noProxy: terminalDirty.noProxy ? terminalDraft.noProxy : null,
+      };
+      return { terminal, system: null };
+    }
     const system: SystemProxyInput = {
       enabled: systemDraft.enabled,
       http: toEndpointInput(systemDraft.http),
@@ -213,62 +212,58 @@ export function useProxySettings() {
       bypass: normalizeBypass(systemDraft.bypassText),
       target: systemDraft.target || null,
     };
-    return { terminal, system };
+    return { terminal: null, system };
   }
-
-  async function saveAll(): Promise<ApplyReport | null> {
-    if (!snapshot.value || loading.value || saving.value) {
+  async function save(scope: ProxyPage): Promise<ApplyReport | null> {
+    const state = pages[scope];
+    if (!snapshot.value || state.loading || state.saving) {
       return null;
     }
-    submitCount.value += 1;
-    saveError.value = "";
-    if (hasSystemErrors.value) {
-      saveError.value = "尚未保存：请先修正系统代理中标记的主机、端口或网络服务，再重新提交。";
+    state.submitCount += 1;
+    state.saveError = "";
+    if (scope === "system" && Object.keys(systemErrors.value).length) {
+      state.saveError = "请修正标记的主机、端口或网络服务。";
       return null;
     }
-
-    saving.value = true;
-    report.value = null;
+    state.saving = true;
+    state.report = null;
     try {
-      const nextReport = await applyProxySettings(createRequest());
-      report.value = nextReport;
-      snapshot.value = nextReport.snapshot;
-      lastReadAt.value = new Date().toLocaleString("zh-CN", { hour12: false });
-      if (nextReport.terminal?.status !== "failed") {
-        syncTerminalDraft(nextReport.snapshot.terminal.persisted);
+      const next = await applyProxySettings(createRequest(scope));
+      state.report = next;
+      mergeSnapshot(next.snapshot, scope);
+      const result = next[scope];
+      // 缺席区块与失败均不能清草稿；只有明确成功且完成回读才同步。
+      if (result && (result.status === "applied" || result.status === "unchanged")) {
+        if (scope === "terminal") {
+          syncTerminalDraft(next.snapshot.terminal.persisted);
+        } else {
+          syncSystemDraft(next.snapshot.system);
+        }
+        state.submitCount = 0;
+        state.lastReadAt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      } else if (!result) {
+        state.saveError = "未收到当前页保存结果，请重新读取核对；草稿已保留。";
       }
-      if (nextReport.system?.status !== "failed") {
-        syncSystemDraft(nextReport.snapshot);
-      }
-      if (nextReport.terminal?.status !== "failed" && nextReport.system?.status !== "failed") {
-        submitCount.value = 0;
-      }
-      return nextReport;
+      return next;
     } catch (error) {
-      saveError.value = `保存未完成：${readableError(error)}。请按原因修正后重试；若结果不明，请先重新读取核对，避免重复写入。`;
+      state.saveError = `保存未完成：${readableError(error)}。请重新读取核对后重试；草稿已保留。`;
       return null;
     } finally {
-      saving.value = false;
+      state.saving = false;
     }
   }
-
   return {
     snapshot,
-    report,
-    loading,
-    saving,
-    loadError,
-    saveError,
-    submitCount,
-    lastReadAt,
-    systemDirty,
+    pages,
+    dirty,
     terminalDraft,
     systemDraft,
     terminalDirty,
+    systemDirty,
     systemErrors,
     reload,
     selectTarget,
-    saveAll,
+    save,
     markTerminalDirty,
     markSystemDirty,
   };

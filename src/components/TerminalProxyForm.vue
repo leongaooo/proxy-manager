@@ -33,13 +33,8 @@ function displayValue(values: TerminalValues, field: TerminalField): string {
 <template>
   <fieldset class="proxy-section" :disabled="disabled">
     <legend>终端代理</legend>
-    <p class="section-intro">
-      编辑持久值（{{ snapshot.persistenceLabel }}）。应用进程值和其他已运行终端的值仅用于核对。
-    </p>
-    <p id="terminal-privacy-hint" class="hint">
-      含认证信息的 URL
-      已脱敏。未修改的字段保存时保持原值；修改时需输入完整新值，留空表示删除该变量。
-    </p>
+    <p class="section-intro">编辑新终端使用的环境变量；留空删除，未修改保留原值。</p>
+    <p id="terminal-privacy-hint" class="hint">认证地址已脱敏；编辑时请填写完整新值。</p>
 
     <div class="terminal-fields">
       <div v-for="field in fields" :key="field.key" class="field">
@@ -56,34 +51,35 @@ function displayValue(values: TerminalValues, field: TerminalField): string {
       </div>
     </div>
 
-    <div class="snapshot-columns">
-      <section aria-labelledby="process-values-title">
-        <h3 id="process-values-title">应用进程值</h3>
-        <p class="hint">这是当前应用读取到的环境，不代表其他终端。</p>
-        <dl class="value-list">
-          <template v-for="field in fields" :key="field.key">
-            <dt>{{ field.label }}</dt>
-            <dd>{{ displayValue(snapshot.process, field.key) }}</dd>
-          </template>
-        </dl>
-      </section>
+    <details class="details-panel">
+      <summary>配置来源与应用进程值</summary>
+      <p class="hint">持久位置：{{ snapshot.persistenceLabel }}</p>
+      <div class="snapshot-columns">
+        <section aria-labelledby="process-values-title">
+          <h3 id="process-values-title">应用进程值</h3>
+          <p class="hint">这是当前应用读取到的环境，不代表其他终端。</p>
+          <dl class="value-list">
+            <template v-for="field in fields" :key="field.key">
+              <dt>{{ field.label }}</dt>
+              <dd>{{ displayValue(snapshot.process, field.key) }}</dd>
+            </template>
+          </dl>
+        </section>
 
-      <section v-if="snapshot.launchd" aria-labelledby="launchd-values-title">
-        <h3 id="launchd-values-title">macOS launchd 用户会话值</h3>
-        <p class="hint">由图形界面应用继承的环境，与 Shell 持久值分开显示。</p>
-        <dl class="value-list">
-          <template v-for="field in fields" :key="field.key">
-            <dt>{{ field.label }}</dt>
-            <dd>{{ displayValue(snapshot.launchd, field.key) }}</dd>
-          </template>
-        </dl>
-      </section>
-    </div>
+        <section v-if="snapshot.launchd" aria-labelledby="launchd-values-title">
+          <h3 id="launchd-values-title">macOS launchd 用户会话值</h3>
+          <p class="hint">由图形界面应用继承的环境，与 Shell 持久值分开显示。</p>
+          <dl class="value-list">
+            <template v-for="field in fields" :key="field.key">
+              <dt>{{ field.label }}</dt>
+              <dd>{{ displayValue(snapshot.launchd, field.key) }}</dd>
+            </template>
+          </dl>
+        </section>
+      </div>
+    </details>
 
-    <div class="notice">
-      已运行的终端不能可靠热更新。保存后请打开新终端，或按所用 Shell
-      的方式重载配置；保存成功不代表代理服务器可以连接。
-    </div>
+    <div class="notice">保存后请打开新终端，或重载 Shell 配置。已运行终端不会自动更新。</div>
 
     <ul v-if="snapshot.warnings.length" class="warnings" aria-label="终端代理警告">
       <li v-for="warning in snapshot.warnings" :key="warning">

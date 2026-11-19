@@ -5,7 +5,12 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { applyProxySettings, getProxySnapshot } from "../api/proxy";
+import {
+  applyProxySettings,
+  getProxySnapshot,
+  getGitProxySnapshot,
+  applyGitProxySettings,
+} from "../api/proxy";
 
 describe("proxy API", () => {
   beforeEach(() => {
@@ -35,4 +40,12 @@ describe("proxy API", () => {
       request,
     });
   });
+});
+
+it("Git命令使用独立请求，保留null和expectedRevision", async () => {
+  await getGitProxySnapshot();
+  expect(invokeMock).toHaveBeenCalledWith("get_git_proxy_snapshot");
+  const request = { mode: "custom" as const, proxy: null, expectedRevision: "v1" };
+  await applyGitProxySettings(request);
+  expect(invokeMock).toHaveBeenCalledWith("apply_git_proxy_settings", { request });
 });

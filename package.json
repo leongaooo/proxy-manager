@@ -1,8 +1,8 @@
 {
   "name": "proxy-manager",
   "private": true,
-  "version": "0.1.0",
-  "description": "A Tauri desktop app for managing terminal and system proxy settings on Windows and macOS.",
+  "version": "0.2.0",
+  "description": "A Tauri desktop app for managing terminal, system and Git proxy settings on Windows and macOS.",
   "license": "MIT",
   "repository": {
     "type": "git",

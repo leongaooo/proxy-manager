@@ -169,6 +169,45 @@ mod tests {
     }
 
     #[test]
+    fn terminal_only_save_does_not_touch_system() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let service = ProxyService::new(Box::new(adapter.clone()));
+        let report = service
+            .apply(&ApplyRequest {
+                terminal: Some(TerminalProxyInput::default()),
+                system: None,
+            })
+            .unwrap();
+
+        assert_eq!(*adapter.writes.lock().unwrap(), vec!["terminal"]);
+        assert!(report.terminal.is_some());
+        assert!(report.system.is_none());
+    }
+
+    #[test]
+    fn system_only_save_does_not_touch_terminal() {
+        let adapter = Arc::new(FakeAdapter::default());
+        let service = ProxyService::new(Box::new(adapter.clone()));
+        let report = service
+            .apply(&ApplyRequest {
+                terminal: None,
+                system: Some(SystemProxyInput {
+                    enabled: false,
+                    http: None,
+                    https: None,
+                    socks: None,
+                    bypass: Vec::new(),
+                    target: None,
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(*adapter.writes.lock().unwrap(), vec!["system"]);
+        assert!(report.terminal.is_none());
+        assert!(report.system.is_some());
+    }
+
+    #[test]
     fn apply_should_not_write_when_any_input_is_invalid() {
         let adapter = Arc::new(FakeAdapter::default());
         let service = ProxyService::new(Box::new(adapter.clone()));

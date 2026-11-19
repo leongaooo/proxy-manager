@@ -2,6 +2,10 @@
 export type { ApplyReport } from "./ApplyReport";
 export type { ApplyRequest } from "./ApplyRequest";
 export type { ApplyStatus } from "./ApplyStatus";
+export type { GitApplyReport } from "./GitApplyReport";
+export type { GitProxyInput } from "./GitProxyInput";
+export type { GitProxyMode } from "./GitProxyMode";
+export type { GitProxySnapshot } from "./GitProxySnapshot";
 export type { Platform } from "./Platform";
 export type { ProxyEndpoint } from "./ProxyEndpoint";
 export type { ProxyErrorCode } from "./ProxyErrorCode";

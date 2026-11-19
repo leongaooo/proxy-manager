@@ -7,8 +7,9 @@ use windows::Win32::Networking::WinInet::{
     INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ,
-    REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_DWORD,
+    REG_EXPAND_SZ, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -117,7 +118,18 @@ fn read_registry_string(area: RegistryArea, name: &str) -> Result<Option<String>
 }
 
 fn write_registry_string(area: RegistryArea, name: &str, value: &str) -> Result<(), ProxyError> {
-    let key = open_registry_key(area, KEY_WRITE, "写入")?;
+    write_registry_string_at_path(registry_path(area), area, name, value)
+}
+
+/// 路径边界与值写入共用同一实现，隔离注册表回归无需接触真实网络设置。
+fn write_registry_string_at_path(
+    path: &str,
+    area: RegistryArea,
+    name: &str,
+    value: &str,
+) -> Result<(), ProxyError> {
+    // 保留 REG_EXPAND_SZ 前需读取旧类型；KEY_WRITE 本身不包含查询值权限。
+    let key = open_registry_key_at_path(path, area, KEY_QUERY_VALUE | KEY_SET_VALUE, "写入")?;
     let name_wide = wide_null(name);
     let existing_type = registry_value_type(&key, &name_wide, area, name)?;
     let kind = match existing_type {
@@ -215,12 +227,15 @@ fn open_registry_key(
     access: REG_SAM_FLAGS,
     action: &str,
 ) -> Result<RegistryKey, ProxyError> {
-    let path = match area {
-        RegistryArea::Environment => "Environment",
-        RegistryArea::InternetSettings => {
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
-        }
-    };
+    open_registry_key_at_path(registry_path(area), area, access, action)
+}
+
+fn open_registry_key_at_path(
+    path: &str,
+    area: RegistryArea,
+    access: REG_SAM_FLAGS,
+    action: &str,
+) -> Result<RegistryKey, ProxyError> {
     let path_wide = wide_null(path);
     let mut key = HKEY::default();
     let status = unsafe {
@@ -234,6 +249,15 @@ fn open_registry_key(
     };
     ensure_registry_success(status, action, registry_label(area), "注册表项")?;
     Ok(RegistryKey(key))
+}
+
+fn registry_path(area: RegistryArea) -> &'static str {
+    match area {
+        RegistryArea::Environment => "Environment",
+        RegistryArea::InternetSettings => {
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
+        }
+    }
 }
 
 fn ensure_registry_success(
@@ -318,4 +342,150 @@ fn refresh_internet_settings() -> Result<(), ProxyError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use windows::Win32::System::Registry::{RegCreateKeyW, RegDeleteKeyW};
+
+    use super::*;
+
+    /// 每次测试创建独立 HKCU\Software 子键；panic 时仍清理，不广播环境或代理变更。
+    struct RegistrySandbox {
+        path: String,
+    }
+
+    impl RegistrySandbox {
+        fn new() -> Self {
+            let path = format!(
+                "Software\\ProxyManagerRegistryTest-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            );
+            let path_wide = wide_null(&path);
+            let mut key = HKEY::default();
+            let status = unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(path_wide.as_ptr()),
+                    None,
+                    KEY_READ,
+                    &mut key,
+                )
+            };
+            if status == ERROR_SUCCESS {
+                drop(RegistryKey(key));
+            }
+            assert_eq!(status, ERROR_FILE_NOT_FOUND, "测试子键必须是全新路径");
+            let sandbox = Self { path };
+            let status =
+                unsafe { RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(path_wide.as_ptr()), &mut key) };
+            assert_eq!(status, ERROR_SUCCESS, "创建隔离测试注册表项失败");
+            drop(RegistryKey(key));
+            sandbox
+        }
+    }
+
+    impl Drop for RegistrySandbox {
+        fn drop(&mut self) {
+            let path_wide = wide_null(&self.path);
+            let status = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(path_wide.as_ptr())) };
+            if !std::thread::panicking() {
+                assert!(
+                    status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND,
+                    "清理隔离注册表子键失败"
+                );
+            }
+        }
+    }
+
+    fn seed_string(key: &RegistryKey, name: &str, kind: REG_VALUE_TYPE, value: &str) {
+        let name_wide = wide_null(name);
+        let value_wide = wide_null(value);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(value_wide.as_ptr().cast::<u8>(), value_wide.len() * 2)
+        };
+        assert_eq!(
+            unsafe { RegSetValueExW(key.0, PCWSTR(name_wide.as_ptr()), None, kind, Some(bytes)) },
+            ERROR_SUCCESS,
+        );
+    }
+
+    fn read_string_and_type(key: &RegistryKey, name: &str) -> (REG_VALUE_TYPE, String) {
+        let name_wide = wide_null(name);
+        let mut kind = REG_VALUE_TYPE::default();
+        let mut buffer = vec![0_u16; 256];
+        let mut byte_count = (buffer.len() * 2) as u32;
+        assert_eq!(
+            unsafe {
+                RegQueryValueExW(
+                    key.0,
+                    PCWSTR(name_wide.as_ptr()),
+                    None,
+                    Some(&mut kind),
+                    Some(buffer.as_mut_ptr().cast::<u8>()),
+                    Some(&mut byte_count),
+                )
+            },
+            ERROR_SUCCESS,
+        );
+        buffer.truncate(byte_count as usize / 2);
+        assert_eq!(buffer.pop(), Some(0));
+        (kind, String::from_utf16(&buffer).unwrap())
+    }
+
+    #[test]
+    fn real_string_write_queries_old_type_and_preserves_sz_and_expand_sz() {
+        let sandbox = RegistrySandbox::new();
+        let area = RegistryArea::Environment;
+        let key = open_registry_key_at_path(&sandbox.path, area, KEY_READ | KEY_SET_VALUE, "写入")
+            .unwrap();
+        seed_string(&key, "Plain", REG_SZ, "old plain");
+        seed_string(&key, "Expanded", REG_EXPAND_SZ, "%USERPROFILE%\\old");
+        drop(key);
+
+        // 生产与测试都在写入路径内重新以最小读写权限开句柄，能实际暴露 KEY_WRITE 查询失败。
+        write_registry_string_at_path(&sandbox.path, area, "Plain", "http://127.0.0.1:7890")
+            .unwrap();
+        write_registry_string_at_path(&sandbox.path, area, "Expanded", "%USERPROFILE%\\new")
+            .unwrap();
+        write_registry_string_at_path(&sandbox.path, area, "NewValue", "新建文本值").unwrap();
+
+        let key = open_registry_key_at_path(&sandbox.path, area, KEY_READ, "读取").unwrap();
+        assert_eq!(
+            read_string_and_type(&key, "Plain"),
+            (REG_SZ, "http://127.0.0.1:7890".to_owned())
+        );
+        assert_eq!(
+            read_string_and_type(&key, "Expanded"),
+            (REG_EXPAND_SZ, "%USERPROFILE%\\new".to_owned())
+        );
+        assert_eq!(
+            read_string_and_type(&key, "NewValue"),
+            (REG_SZ, "新建文本值".to_owned())
+        );
+        drop(key);
+        let path_wide = wide_null(&sandbox.path);
+        drop(sandbox);
+
+        // 清理结果也实际回读，不能仅以发出了删除调用当作无残留。
+        let mut missing_key = HKEY::default();
+        assert_eq!(
+            unsafe {
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(path_wide.as_ptr()),
+                    None,
+                    KEY_READ,
+                    &mut missing_key,
+                )
+            },
+            ERROR_FILE_NOT_FOUND,
+        );
+    }
 }
