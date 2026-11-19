@@ -1,0 +1,37 @@
+{
+  "name": "proxy-manager",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A Tauri desktop app for managing terminal and system proxy settings on Windows and macOS.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leongaooo/proxy-manager.git"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write src vite.config.ts index.html",
+    "format:check": "prettier --check src vite.config.ts index.html"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vue-tsc": "^3.3.5",
+    "@tauri-apps/cli": "^2",
+    "@vue/test-utils": "^2.4.6",
+    "vitest": "^4.0.0",
+    "jsdom": "^27.0.0",
+    "prettier": "^3.6.2"
+  }
+}

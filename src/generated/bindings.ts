@@ -1,0 +1,15 @@
+// 由 Rust contracts.rs 中的 ts-rs 测试生成各类型文件；此文件只提供统一导入入口。
+export type { ApplyReport } from "./ApplyReport";
+export type { ApplyRequest } from "./ApplyRequest";
+export type { ApplyStatus } from "./ApplyStatus";
+export type { Platform } from "./Platform";
+export type { ProxyEndpoint } from "./ProxyEndpoint";
+export type { ProxyErrorCode } from "./ProxyErrorCode";
+export type { ProxySnapshot } from "./ProxySnapshot";
+export type { SectionResult } from "./SectionResult";
+export type { SectionStatus } from "./SectionStatus";
+export type { SystemProxyInput } from "./SystemProxyInput";
+export type { SystemSnapshot } from "./SystemSnapshot";
+export type { TerminalProxyInput } from "./TerminalProxyInput";
+export type { TerminalSnapshot } from "./TerminalSnapshot";
+export type { TerminalValues } from "./TerminalValues";
